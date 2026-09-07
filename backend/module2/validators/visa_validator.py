@@ -27,21 +27,95 @@ from module2.rules.visa_rules import VISA_RULES
 class VisaValidator:
     """Validate OCR-extracted visa information."""
 
-    def validate(self, data: dict, passport_data: dict | None = None) -> dict:
-        checks = []
+    # ---------------------------------------------------------
+    # Prototype configuration
+    # ---------------------------------------------------------
 
-        # ---------------------------------------------------------
-        # Helper
-        # ---------------------------------------------------------
+    SUPPORTED_VISA_TYPES = {
+        "TOURIST",
+        "BUSINESS",
+        "STUDENT",
+        "EMPLOYMENT",
+        "TRANSIT",
+        "MEDICAL",
+        "CONFERENCE",
+        "ENTRY",
+        "OTHER",
+    }
+
+    SUPPORTED_ENTRY_TYPES = {
+        "SINGLE",
+        "DOUBLE",
+        "MULTIPLE",
+    }
+
+    MIN_STAY_DAYS = 1
+    MAX_STAY_DAYS = 3650
+
+    # ---------------------------------------------------------
+    # Rule lookup
+    # ---------------------------------------------------------
+
+    def __init__(self):
+        self.rules = {
+            rule.rule_id: rule
+            for rule in VISA_RULES
+            if rule.enabled
+        }
+
+    def _severity(self, rule_id: str, default: Severity) -> Severity:
+        """
+        Get severity from visa_rules.py.
+
+        This prevents severity from being duplicated inside
+        every validation check.
+        """
+        rule = self.rules.get(rule_id)
+
+        if rule:
+            return rule.severity
+
+        return default
+
+    # ---------------------------------------------------------
+    # Validation
+    # ---------------------------------------------------------
+
+    def validate(
+        self,
+        data: dict,
+        passport_data: dict | None = None,
+    ) -> dict:
+
+        checks = []
 
         def add_check(
             rule_id,
             status,
-            severity,
             message,
             field=None,
             details=None,
+            default_severity=Severity.MEDIUM,
         ):
+            """
+            Add a standardized validation result.
+
+            Severity comes from VISA_RULES whenever the rule
+            exists there.
+            """
+
+            # Disabled/nonexistent rule protection
+            rule = self.rules.get(rule_id)
+
+            if rule is None and rule_id.startswith("VISA-"):
+                status = CheckStatus.NOT_CHECKED
+
+            severity = (
+                rule.severity
+                if rule
+                else default_severity
+            )
+
             checks.append(
                 ValidationCheck(
                     rule_id=rule_id,
@@ -54,28 +128,32 @@ class VisaValidator:
             )
 
         # ---------------------------------------------------------
-        # Basic document type
+        # Document type
         # ---------------------------------------------------------
 
         document_type = str(
             data.get("document_type", "")
-        ).upper()
+        ).strip().upper()
 
         if document_type == "VISA":
-            add_check(
-                "COMMON-001",
-                CheckStatus.PASS,
-                Severity.INFO,
-                "Document type is VISA.",
-                "document_type",
+            checks.append(
+                ValidationCheck(
+                    rule_id="COMMON-001",
+                    status=CheckStatus.PASS,
+                    severity=Severity.INFO,
+                    message="Document type is VISA.",
+                    field="document_type",
+                )
             )
         else:
-            add_check(
-                "COMMON-001",
-                CheckStatus.FAIL,
-                Severity.HIGH,
-                "Document type must be VISA.",
-                "document_type",
+            checks.append(
+                ValidationCheck(
+                    rule_id="COMMON-001",
+                    status=CheckStatus.FAIL,
+                    severity=Severity.HIGH,
+                    message="Document type must be VISA.",
+                    field="document_type",
+                )
             )
 
         # ---------------------------------------------------------
@@ -88,7 +166,6 @@ class VisaValidator:
             add_check(
                 "VISA-001",
                 CheckStatus.PASS,
-                Severity.INFO,
                 "Visa number is present.",
                 "visa_number",
             )
@@ -96,7 +173,6 @@ class VisaValidator:
             add_check(
                 "VISA-001",
                 CheckStatus.FAIL,
-                Severity.HIGH,
                 "Visa number is missing.",
                 "visa_number",
             )
@@ -106,13 +182,13 @@ class VisaValidator:
         # ---------------------------------------------------------
 
         if visa_number:
-            visa_number_clean = str(visa_number).strip()
+            visa_number_clean = str(
+                visa_number
+            ).strip().upper()
 
             valid_structure = (
-                5 <= len(visa_number_clean) <= 20
-                and all(
-                    char.isalnum() or char in "-/"
-                    for char in visa_number_clean
+                self._valid_visa_number(
+                    visa_number_clean
                 )
             )
 
@@ -120,7 +196,6 @@ class VisaValidator:
                 add_check(
                     "VISA-002",
                     CheckStatus.PASS,
-                    Severity.INFO,
                     "Visa number has a structurally acceptable format.",
                     "visa_number",
                 )
@@ -128,10 +203,16 @@ class VisaValidator:
                 add_check(
                     "VISA-002",
                     CheckStatus.FAIL,
-                    Severity.MEDIUM,
                     "Visa number does not match the configured prototype structure.",
                     "visa_number",
                 )
+        else:
+            add_check(
+                "VISA-002",
+                CheckStatus.NOT_CHECKED,
+                "Visa number structure could not be evaluated because the number is missing.",
+                "visa_number",
+            )
 
         # ---------------------------------------------------------
         # VISA-003: Visa type present
@@ -143,7 +224,6 @@ class VisaValidator:
             add_check(
                 "VISA-003",
                 CheckStatus.PASS,
-                Severity.INFO,
                 "Visa type is present.",
                 "visa_type",
             )
@@ -151,7 +231,6 @@ class VisaValidator:
             add_check(
                 "VISA-003",
                 CheckStatus.FAIL,
-                Severity.HIGH,
                 "Visa type is missing.",
                 "visa_type",
             )
@@ -161,45 +240,43 @@ class VisaValidator:
         # ---------------------------------------------------------
 
         if visa_type:
-            normalized_type = str(visa_type).strip().upper()
+            normalized_type = str(
+                visa_type
+            ).strip().upper()
 
-            supported_types = {
-                "TOURIST",
-                "BUSINESS",
-                "STUDENT",
-                "EMPLOYMENT",
-                "TRANSIT",
-                "MEDICAL",
-                "CONFERENCE",
-                "ENTRY",
-                "OTHER",
-            }
-
-            if normalized_type in supported_types:
+            if normalized_type in self.SUPPORTED_VISA_TYPES:
                 add_check(
                     "VISA-004",
                     CheckStatus.PASS,
-                    Severity.INFO,
-                    "Visa type is present in the prototype category registry.",
+                    "Visa type exists in the prototype category registry.",
                     "visa_type",
                 )
             else:
                 add_check(
                     "VISA-004",
                     CheckStatus.WARNING,
-                    Severity.HIGH,
                     "Visa type is not present in the prototype category registry.",
                     "visa_type",
                     {"value": visa_type},
                 )
+        else:
+            add_check(
+                "VISA-004",
+                CheckStatus.NOT_CHECKED,
+                "Visa type support could not be evaluated because the visa type is missing.",
+                "visa_type",
+            )
 
         # ---------------------------------------------------------
-        # Date parsing helper
+        # Date parsing
         # ---------------------------------------------------------
 
         def parse_date(value):
             if not value:
                 return None
+
+            if isinstance(value, datetime):
+                return value.date()
 
             if isinstance(value, date):
                 return value
@@ -209,12 +286,8 @@ class VisaValidator:
                     str(value),
                     "%Y-%m-%d",
                 ).date()
-            except ValueError:
+            except (TypeError, ValueError):
                 return None
-
-        # ---------------------------------------------------------
-        # VISA-005: Date parsing
-        # ---------------------------------------------------------
 
         date_fields = [
             "issue_date",
@@ -228,18 +301,23 @@ class VisaValidator:
 
         for field in date_fields:
             if data.get(field) is not None:
-                parsed = parse_date(data.get(field))
+                parsed = parse_date(
+                    data.get(field)
+                )
 
                 if parsed is None:
                     invalid_dates.append(field)
                 else:
                     parsed_dates[field] = parsed
 
+        # ---------------------------------------------------------
+        # VISA-005: Dates parseable
+        # ---------------------------------------------------------
+
         if invalid_dates:
             add_check(
                 "VISA-005",
                 CheckStatus.FAIL,
-                Severity.HIGH,
                 "One or more visa dates are invalid calendar dates.",
                 "dates",
                 {"invalid_fields": invalid_dates},
@@ -248,7 +326,6 @@ class VisaValidator:
             add_check(
                 "VISA-005",
                 CheckStatus.PASS,
-                Severity.INFO,
                 "Provided visa dates are valid calendar dates.",
                 "dates",
             )
@@ -256,7 +333,6 @@ class VisaValidator:
             add_check(
                 "VISA-005",
                 CheckStatus.NOT_CHECKED,
-                Severity.HIGH,
                 "No visa validity dates were provided.",
                 "dates",
             )
@@ -270,14 +346,15 @@ class VisaValidator:
             or parsed_dates.get("issue_date")
         )
 
-        expiry_date = parsed_dates.get("expiry_date")
+        expiry_date = parsed_dates.get(
+            "expiry_date"
+        )
 
         if start_date and expiry_date:
             if start_date <= expiry_date:
                 add_check(
                     "VISA-006",
                     CheckStatus.PASS,
-                    Severity.INFO,
                     "Visa validity dates are in the correct order.",
                     "dates",
                 )
@@ -285,7 +362,6 @@ class VisaValidator:
                 add_check(
                     "VISA-006",
                     CheckStatus.FAIL,
-                    Severity.HIGH,
                     "Visa start date is after the expiry date.",
                     "dates",
                 )
@@ -293,7 +369,6 @@ class VisaValidator:
             add_check(
                 "VISA-006",
                 CheckStatus.NOT_CHECKED,
-                Severity.HIGH,
                 "Visa validity order could not be evaluated.",
                 "dates",
             )
@@ -307,37 +382,37 @@ class VisaValidator:
         ) or date.today()
 
         if start_date and expiry_date:
+
             if screening_date < start_date:
                 add_check(
                     "VISA-007",
                     CheckStatus.WARNING,
-                    Severity.HIGH,
                     "Visa validity has not started on the screening date.",
                     "dates",
                     {"screening_date": str(screening_date)},
                 )
+
             elif screening_date > expiry_date:
                 add_check(
                     "VISA-007",
                     CheckStatus.FAIL,
-                    Severity.HIGH,
                     "Visa is expired on the screening date.",
                     "expiry_date",
                     {"screening_date": str(screening_date)},
                 )
+
             else:
                 add_check(
                     "VISA-007",
                     CheckStatus.PASS,
-                    Severity.INFO,
                     "Visa is within its configured validity period.",
                     "dates",
                 )
+
         else:
             add_check(
                 "VISA-007",
                 CheckStatus.NOT_CHECKED,
-                Severity.HIGH,
                 "Current visa validity could not be evaluated.",
                 "dates",
             )
@@ -349,17 +424,15 @@ class VisaValidator:
         entry_type = data.get("entry_type")
 
         if entry_type:
-            normalized_entry = str(entry_type).strip().upper()
 
-            if normalized_entry in {
-                "SINGLE",
-                "DOUBLE",
-                "MULTIPLE",
-            }:
+            normalized_entry = str(
+                entry_type
+            ).strip().upper()
+
+            if normalized_entry in self.SUPPORTED_ENTRY_TYPES:
                 add_check(
                     "VISA-008",
                     CheckStatus.PASS,
-                    Severity.INFO,
                     "Visa entry type is recognized.",
                     "entry_type",
                 )
@@ -367,15 +440,15 @@ class VisaValidator:
                 add_check(
                     "VISA-008",
                     CheckStatus.WARNING,
-                    Severity.MEDIUM,
                     "Visa entry type is not in the prototype registry.",
                     "entry_type",
+                    {"value": entry_type},
                 )
+
         else:
             add_check(
                 "VISA-008",
                 CheckStatus.NOT_CHECKED,
-                Severity.MEDIUM,
                 "Entry type was not provided.",
                 "entry_type",
             )
@@ -384,17 +457,25 @@ class VisaValidator:
         # VISA-009: Stay duration
         # ---------------------------------------------------------
 
-        stay_duration = data.get("stay_duration_days")
+        stay_duration = data.get(
+            "stay_duration_days"
+        )
 
         if stay_duration is not None:
-            try:
-                stay_duration = int(stay_duration)
 
-                if 1 <= stay_duration <= 3650:
+            try:
+                stay_duration = int(
+                    stay_duration
+                )
+
+                if (
+                    self.MIN_STAY_DAYS
+                    <= stay_duration
+                    <= self.MAX_STAY_DAYS
+                ):
                     add_check(
                         "VISA-009",
                         CheckStatus.PASS,
-                        Severity.INFO,
                         "Stay duration is within the prototype sanity range.",
                         "stay_duration_days",
                     )
@@ -402,7 +483,6 @@ class VisaValidator:
                     add_check(
                         "VISA-009",
                         CheckStatus.FAIL,
-                        Severity.HIGH,
                         "Stay duration is outside the configured prototype range.",
                         "stay_duration_days",
                     )
@@ -411,29 +491,34 @@ class VisaValidator:
                 add_check(
                     "VISA-009",
                     CheckStatus.FAIL,
-                    Severity.HIGH,
                     "Stay duration must be a valid number of days.",
                     "stay_duration_days",
                 )
+
         else:
             add_check(
                 "VISA-009",
                 CheckStatus.NOT_CHECKED,
-                Severity.HIGH,
                 "Stay duration was not provided.",
                 "stay_duration_days",
             )
 
         # ---------------------------------------------------------
-        # Cross-document checks
+        # Cross-document validation
         # ---------------------------------------------------------
 
         if passport_data:
-            # VISA-010: Passport number match
-            visa_passport = data.get("passport_number")
-            reference_passport = passport_data.get("passport_number")
+
+            # VISA-010
+            visa_passport = data.get(
+                "passport_number"
+            )
+            reference_passport = passport_data.get(
+                "passport_number"
+            )
 
             if visa_passport and reference_passport:
+
                 if (
                     str(visa_passport).strip().upper()
                     == str(reference_passport).strip().upper()
@@ -441,7 +526,6 @@ class VisaValidator:
                     add_check(
                         "VISA-010",
                         CheckStatus.PASS,
-                        Severity.INFO,
                         "Visa passport number matches the referenced passport.",
                         "passport_number",
                     )
@@ -449,24 +533,26 @@ class VisaValidator:
                     add_check(
                         "VISA-010",
                         CheckStatus.FAIL,
-                        Severity.HIGH,
                         "Visa passport number does not match the referenced passport.",
                         "passport_number",
                     )
+
             else:
                 add_check(
                     "VISA-010",
                     CheckStatus.NOT_CHECKED,
-                    Severity.HIGH,
                     "Passport number comparison could not be performed.",
                     "passport_number",
                 )
 
-            # VISA-011: Name match
+            # VISA-011
             visa_name = data.get("name")
-            passport_name = passport_data.get("name")
+            passport_name = passport_data.get(
+                "name"
+            )
 
             if visa_name and passport_name:
+
                 if (
                     str(visa_name).strip().upper()
                     == str(passport_name).strip().upper()
@@ -474,7 +560,6 @@ class VisaValidator:
                     add_check(
                         "VISA-011",
                         CheckStatus.PASS,
-                        Severity.INFO,
                         "Visa holder name matches the referenced passport.",
                         "name",
                     )
@@ -482,24 +567,31 @@ class VisaValidator:
                     add_check(
                         "VISA-011",
                         CheckStatus.FAIL,
-                        Severity.HIGH,
                         "Visa holder name does not match the referenced passport.",
                         "name",
                     )
+
             else:
                 add_check(
                     "VISA-011",
                     CheckStatus.NOT_CHECKED,
-                    Severity.HIGH,
                     "Name comparison could not be performed.",
                     "name",
                 )
 
-            # VISA-012: Nationality match
-            visa_nationality = data.get("nationality")
-            passport_nationality = passport_data.get("nationality")
+            # VISA-012
+            visa_nationality = data.get(
+                "nationality"
+            )
+            passport_nationality = passport_data.get(
+                "nationality"
+            )
 
-            if visa_nationality and passport_nationality:
+            if (
+                visa_nationality
+                and passport_nationality
+            ):
+
                 if (
                     str(visa_nationality).strip().upper()
                     == str(passport_nationality).strip().upper()
@@ -507,7 +599,6 @@ class VisaValidator:
                     add_check(
                         "VISA-012",
                         CheckStatus.PASS,
-                        Severity.INFO,
                         "Visa nationality matches passport nationality.",
                         "nationality",
                     )
@@ -515,30 +606,31 @@ class VisaValidator:
                     add_check(
                         "VISA-012",
                         CheckStatus.WARNING,
-                        Severity.MEDIUM,
                         "Visa nationality differs from passport nationality.",
                         "nationality",
                     )
+
             else:
                 add_check(
                     "VISA-012",
                     CheckStatus.NOT_CHECKED,
-                    Severity.MEDIUM,
                     "Nationality comparison could not be performed.",
                     "nationality",
                 )
 
-            # VISA-013: Passport validity
+            # VISA-013
             passport_expiry = parse_date(
-                passport_data.get("expiry_date")
+                passport_data.get(
+                    "expiry_date"
+                )
             )
 
             if expiry_date and passport_expiry:
+
                 if expiry_date <= passport_expiry:
                     add_check(
                         "VISA-013",
                         CheckStatus.PASS,
-                        Severity.INFO,
                         "Visa expiry does not exceed passport expiry.",
                         "expiry_date",
                     )
@@ -546,63 +638,56 @@ class VisaValidator:
                     add_check(
                         "VISA-013",
                         CheckStatus.WARNING,
-                        Severity.HIGH,
                         "Visa expiry extends beyond passport expiry.",
                         "expiry_date",
                     )
+
             else:
                 add_check(
                     "VISA-013",
                     CheckStatus.NOT_CHECKED,
-                    Severity.HIGH,
                     "Visa/passport validity relationship could not be evaluated.",
                     "expiry_date",
                 )
 
         else:
-            for rule_id, message, field, severity in [
-                (
-                    "VISA-010",
-                    "Passport number comparison requires passport data.",
-                    "passport_number",
-                    Severity.HIGH,
-                ),
-                (
-                    "VISA-011",
-                    "Name comparison requires passport data.",
-                    "name",
-                    Severity.HIGH,
-                ),
-                (
-                    "VISA-012",
-                    "Nationality comparison requires passport data.",
-                    "nationality",
-                    Severity.MEDIUM,
-                ),
-                (
-                    "VISA-013",
-                    "Visa/passport validity comparison requires passport data.",
-                    "expiry_date",
-                    Severity.HIGH,
-                ),
-            ]:
-                add_check(
-                    rule_id,
-                    CheckStatus.NOT_CHECKED,
-                    severity,
-                    message,
-                    field,
-                )
+
+            add_check(
+                "VISA-010",
+                CheckStatus.NOT_CHECKED,
+                "Passport number comparison requires passport data.",
+                "passport_number",
+            )
+
+            add_check(
+                "VISA-011",
+                CheckStatus.NOT_CHECKED,
+                "Name comparison requires passport data.",
+                "name",
+            )
+
+            add_check(
+                "VISA-012",
+                CheckStatus.NOT_CHECKED,
+                "Nationality comparison requires passport data.",
+                "nationality",
+            )
+
+            add_check(
+                "VISA-013",
+                CheckStatus.NOT_CHECKED,
+                "Visa/passport validity comparison requires passport data.",
+                "expiry_date",
+            )
 
         # ---------------------------------------------------------
-        # VISA-014: Category-specific rules
+        # VISA-014: Category rules
         # ---------------------------------------------------------
 
         if visa_type:
             add_check(
                 "VISA-014",
                 CheckStatus.PASS,
-                Severity.INFO,
                 "Visa category is available for category-specific validation.",
                 "visa_type",
             )
@@ -610,55 +695,66 @@ class VisaValidator:
             add_check(
                 "VISA-014",
                 CheckStatus.NOT_CHECKED,
-                Severity.HIGH,
                 "Category-specific validation cannot be applied without a visa type.",
                 "visa_type",
             )
 
         # ---------------------------------------------------------
-        # VISA-015: Reference status
+        # VISA-015: Reference repository
         # ---------------------------------------------------------
 
         add_check(
             "VISA-015",
             CheckStatus.NOT_CHECKED,
-            Severity.HIGH,
             "Government/reference repository verification is not enabled in the prototype.",
             "reference_status",
             {
                 "prototype": True,
-                "future": "Authorized government or approved reference repository integration."
+                "future": (
+                    "Authorized government or approved "
+                    "reference repository integration."
+                ),
             },
+        )
+
+        # ---------------------------------------------------------
+        # Summary
+        # ---------------------------------------------------------
+
+        passed = sum(
+            1
+            for check in checks
+            if check.status == CheckStatus.PASS
+        )
+
+        failed = sum(
+            1
+            for check in checks
+            if check.status == CheckStatus.FAIL
+        )
+
+        warnings = sum(
+            1
+            for check in checks
+            if check.status == CheckStatus.WARNING
+        )
+
+        not_checked = sum(
+            1
+            for check in checks
+            if check.status == CheckStatus.NOT_CHECKED
         )
 
         # ---------------------------------------------------------
         # Overall status
         # ---------------------------------------------------------
 
-        passed = sum(
-            1 for check in checks
-            if check.status == CheckStatus.PASS
-        )
-
-        failed = sum(
-            1 for check in checks
-            if check.status == CheckStatus.FAIL
-        )
-
-        warnings = sum(
-            1 for check in checks
-            if check.status == CheckStatus.WARNING
-        )
-
-        not_checked = sum(
-            1 for check in checks
-            if check.status == CheckStatus.NOT_CHECKED
-        )
-
         if failed > 0:
             overall_status = OverallStatus.INVALID
+
         elif warnings > 0 or not_checked > 0:
             overall_status = OverallStatus.REVIEW
+
         else:
             overall_status = OverallStatus.VALID
 
@@ -674,3 +770,26 @@ class VisaValidator:
             },
             "checks": checks,
         }
+
+    # ---------------------------------------------------------
+    # Internal validation helpers
+    # ---------------------------------------------------------
+
+    @staticmethod
+    def _valid_visa_number(visa_number: str) -> bool:
+        """
+        Generic prototype visa-number structure.
+
+        This intentionally does NOT claim to represent
+        an official country-specific visa-number format.
+        """
+
+        if not (
+            5 <= len(visa_number) <= 20
+        ):
+            return False
+
+        return all(
+            char.isalnum() or char in "-/"
+            for char in visa_number
+        )
